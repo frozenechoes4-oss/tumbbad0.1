@@ -1,0 +1,8 @@
+{
+  "name": "Tumbbad: The Womb",
+  "description": "A first-person 3D folklore horror-stealth game inspired by Tumbbad. Descend into the crimson womb, steal the cursed Gold Mudras, distract Hastar with dough decoys, and escape into the monsoon.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
