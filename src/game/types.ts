@@ -6,6 +6,10 @@ export type MonsterState = 'PATROL' | 'CHASE' | 'DECOY';
 
 export type PlayerStance = 'standing' | 'crouching' | 'sprinting';
 
+export type InputMode = 'desktop' | 'mobile';
+
+export type JumpscareKind = 'ambush' | 'capture';
+
 export interface ColliderCircle {
   x: number;
   z: number;
@@ -24,8 +28,13 @@ export interface HudSnapshot {
   lightWarning: boolean;
   lightExposureRatio: number;
   promptText: string | null;
+  canInteract: boolean;
   inCavern: boolean;
   elapsedSeconds: number;
+  inputMode: InputMode;
+  jumpscareActive: boolean;
+  jumpscareKind: JumpscareKind | null;
+  horrorTension: number;
 }
 
 export interface RunSummary {

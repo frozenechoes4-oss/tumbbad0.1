@@ -1,9 +1,10 @@
 import { formatRunTime } from '../game/rules';
-import type { GamePhase, RunSummary } from '../game/types';
+import type { GamePhase, InputMode, RunSummary } from '../game/types';
 import { TumbbadCrest } from './GameIcons';
 
 interface GameModalsProps {
   phase: GamePhase;
+  inputMode: InputMode;
   runSummary: RunSummary | null;
   onStart: () => void;
   onResume: () => void;
@@ -13,6 +14,7 @@ interface GameModalsProps {
 
 export function GameModals({
   phase,
+  inputMode,
   runSummary,
   onStart,
   onResume,
@@ -24,14 +26,14 @@ export function GameModals({
   if (phase === 'title') {
     return (
       <div
-        className="fixed inset-0 z-20 flex flex-col justify-between px-8 py-10 sm:px-16 sm:py-12"
+        className="fixed inset-0 z-20 flex flex-col justify-between px-6 py-8 sm:px-16 sm:py-12"
         style={{
           background:
             'radial-gradient(circle at 65% 45%, rgba(16, 4, 4, 0.25) 0%, rgba(5, 2, 2, 0.88) 72%)',
         }}
       >
         <div className="max-w-xl my-auto">
-          <TumbbadCrest className="w-16 h-16 mb-5" />
+          <TumbbadCrest className="w-14 h-14 sm:w-16 sm:h-16 mb-4 sm:mb-5" />
           <h1 className="font-display text-4xl sm:text-6xl font-bold tracking-[0.08em] text-[#e8bf58] hud-stroke text-balance leading-[1.08]">
             Tumbbad: The Womb
           </h1>
@@ -56,8 +58,10 @@ export function GameModals({
           </div>
         </div>
 
-        <div className="text-xs sm:text-sm text-[#9d8d75] tracking-wide whitespace-nowrap overflow-hidden text-ellipsis">
-          WASD Move · Shift Sprint · C Crouch · E Collect / Unlock · F Throw Dough · Esc Pause
+        <div className="text-xs sm:text-sm text-[#9d8d75] tracking-wide">
+          {inputMode === 'mobile'
+            ? 'Left Joystick Move · Drag Right Look · Crouch, Sprint, Throw Dough & Take Buttons'
+            : 'WASD Move · Shift Sprint · C Crouch · E Collect / Unlock · F Throw Dough · Esc Pause'}
         </div>
       </div>
     );

@@ -1,10 +1,22 @@
-import type { ColliderCircle, MonsterState } from './types';
+import type { ColliderCircle, InputMode, MonsterState } from './types';
 
 export const REQUIRED_COINS = 5;
 export const MAX_DECOYS = 3;
 export const DECOY_DURATION = 8.0;
 export const EYE_HEIGHT_STAND = 1.7;
 export const EYE_HEIGHT_CROUCH = 1.0;
+
+export const MONSTER_SPEEDS = {
+  PATROL: 5.4,
+  CHASE: 8.9,
+  DECOY: 10.5,
+} as const;
+
+export const PLAYER_SPEEDS = {
+  WALK: 4.7,
+  CROUCH: 2.4,
+  SPRINT: 8.1,
+} as const;
 
 export const CAVERN_PILLARS: ColliderCircle[] = [
   { x: -10, z: -16, r: 2.2 },
@@ -107,6 +119,8 @@ export interface MonsterEvaluationInput {
   distToPlayer3D: number;
   lookDot: number;
   isSprinting: boolean;
+  isCrouching?: boolean;
+  isMoving?: boolean;
   hasActiveDecoy: boolean;
 }
 
@@ -117,6 +131,7 @@ export interface MonsterEvaluationResult {
   shiningLightOnMonster: boolean;
   lightDetected: boolean;
   sprintDetected: boolean;
+  proximityDetected: boolean;
   triggeredChase: boolean;
 }
 
@@ -131,17 +146,20 @@ export function evaluateMonsterState(input: MonsterEvaluationInput): MonsterEval
     distToPlayer3D,
     lookDot,
     isSprinting,
+    isCrouching = false,
+    isMoving = true,
     hasActiveDecoy,
   } = input;
 
-  const shiningLightOnMonster = playerInCavern && distToPlayer3D < 22 && lookDot > 0.87;
+  const shiningLightOnMonster = playerInCavern && distToPlayer3D < 23 && lookDot > 0.85;
   let lightExposure =
     shiningLightOnMonster && !hasActiveDecoy
-      ? prevLightExposure + dt
-      : Math.max(0, prevLightExposure - dt * 0.8);
+      ? prevLightExposure + dt * 1.15
+      : Math.max(0, prevLightExposure - dt * 0.75);
 
-  const sprintDetected = playerInCavern && isSprinting && distToPlayerXZ < 19;
-  const lightDetected = lightExposure > 1.15;
+  const sprintDetected = playerInCavern && isSprinting && distToPlayerXZ < 20;
+  const proximityDetected = playerInCavern && !isCrouching && isMoving && distToPlayerXZ < 5.2;
+  const lightDetected = lightExposure > 1.05;
 
   let nextState: MonsterState = 'PATROL';
   let alertTimer = prevAlertTimer;
@@ -149,9 +167,9 @@ export function evaluateMonsterState(input: MonsterEvaluationInput): MonsterEval
   if (hasActiveDecoy) {
     nextState = 'DECOY';
     lightExposure = 0;
-  } else if (sprintDetected || lightDetected) {
+  } else if (sprintDetected || lightDetected || proximityDetected) {
     nextState = 'CHASE';
-    alertTimer = 6.5;
+    alertTimer = 7.5;
   } else if (prevState === 'CHASE') {
     alertTimer = Math.max(0, prevAlertTimer - dt);
     if (playerInCavern && alertTimer > 0) {
@@ -168,6 +186,7 @@ export function evaluateMonsterState(input: MonsterEvaluationInput): MonsterEval
     shiningLightOnMonster: shiningLightOnMonster && !hasActiveDecoy,
     lightDetected,
     sprintDetected,
+    proximityDetected,
     triggeredChase: prevState !== 'CHASE' && nextState === 'CHASE',
   };
 }
@@ -195,4 +214,47 @@ export function formatRunTime(totalSeconds: number): string {
   const mins = Math.floor(clamped / 60);
   const secs = clamped % 60;
   return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+}
+
+export function detectAutoInputMode(params: {
+  hasCoarsePointer: boolean;
+  maxTouchPoints: number;
+  viewportWidth: number;
+  recentTouch: boolean;
+}): InputMode {
+  if (params.recentTouch || params.hasCoarsePointer || params.viewportWidth <= 768) {
+    return 'mobile';
+  }
+  if (params.maxTouchPoints > 0 && params.viewportWidth <= 1024) {
+    return 'mobile';
+  }
+  return 'desktop';
+}
+
+export function shouldTriggerAmbushJumpscare(params: {
+  triggeredChase: boolean;
+  monsterState: MonsterState;
+  distToPlayerXZ: number;
+  cooldownRemaining: number;
+  playerInCavern: boolean;
+}): boolean {
+  if (!params.playerInCavern || params.cooldownRemaining > 0) return false;
+  if (params.triggeredChase && params.distToPlayerXZ < 18) return true;
+  if (params.monsterState === 'CHASE' && params.distToPlayerXZ < 6.8) return true;
+  return false;
+}
+
+export function computeHorrorTension(params: {
+  monsterState: MonsterState;
+  distToPlayerXZ: number;
+  playerInCavern: boolean;
+  lightExposureRatio: number;
+}): number {
+  const base = params.playerInCavern ? 0.22 : 0.04;
+  const proximity = params.playerInCavern
+    ? Math.max(0, 1 - params.distToPlayerXZ / 22) * 0.58
+    : 0;
+  const chaseBoost = params.monsterState === 'CHASE' ? 0.45 : 0;
+  const lightBoost = params.lightExposureRatio * 0.25;
+  return Math.min(1, Math.max(0, base + proximity + chaseBoost + lightBoost));
 }

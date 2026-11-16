@@ -16,7 +16,9 @@ import {
   canUnlockExit,
   COIN_LOCATIONS,
   computeDepthFactor,
+  computeHorrorTension,
   DECOY_DURATION,
+  detectAutoInputMode,
   evaluateMonsterState,
   EXIT_DOOR_POS,
   EYE_HEIGHT_CROUCH,
@@ -24,12 +26,15 @@ import {
   getFloorHeight,
   isPlayerCaptured,
   MAX_DECOYS,
+  MONSTER_SPEEDS,
   MONSTER_WAYPOINTS,
+  PLAYER_SPEEDS,
   REQUIRED_COINS,
   resolveWorldConstraints,
+  shouldTriggerAmbushJumpscare,
 } from './rules';
 import { createProceduralTextures, type ProceduralTextureSet } from './textures';
-import type { GamePhase, HudSnapshot, MonsterState, RunSummary } from './types';
+import type { GamePhase, HudSnapshot, InputMode, JumpscareKind, MonsterState, RunSummary } from './types';
 
 interface CoinEntity {
   group: THREE.Group;
@@ -81,6 +86,8 @@ export class TumbbadEngine {
   private sound: SoundSystem;
   private envRT: THREE.WebGLRenderTarget;
 
+  private moonKey!: THREE.DirectionalLight;
+  private wombLights: THREE.PointLight[] = [];
   private rainGeo!: THREE.BufferGeometry;
   private rainLines!: THREE.LineSegments;
   private readonly rainCount = 1600;
@@ -89,6 +96,9 @@ export class TumbbadEngine {
   private activeDecoys: DecoyEntity[] = [];
 
   private phase: GamePhase = 'title';
+  private inputMode: InputMode = 'desktop';
+  private recentTouch = false;
+  private lastTouchTimestamp = 0;
   private muted = false;
   private isDisposed = false;
   private contextLost = false;
@@ -100,6 +110,9 @@ export class TumbbadEngine {
   private decoysUsed = 0;
   private isCrouching = false;
   private isSprinting = false;
+  private touchSprint = false;
+  private touchMoveX = 0;
+  private touchMoveY = 0;
   private elapsedSeconds = 0;
   private stepAccumulator = 0;
   private distanceBob = 0;
@@ -110,6 +123,17 @@ export class TumbbadEngine {
   private lightExposure = 0;
   private alertTimer = 0;
 
+  // Horror & Jumpscare state
+  private horrorTension = 0;
+  private cameraTrauma = 0;
+  private jumpscareTimer = 0;
+  private jumpscareKind: JumpscareKind | null = null;
+  private ambushCooldown = 3.0;
+  private capturingTimer = 0;
+  private captureReason = '';
+  private nextLightningTimer = 7.0;
+  private lightningFlash = 0;
+
   // Interaction state
   private nearbyCoin: CoinEntity | null = null;
   private nearExitDoor = false;
@@ -119,6 +143,7 @@ export class TumbbadEngine {
   private keysPressed = new Set<string>();
   private lastTime = performance.now();
   private simTime = 0;
+  private coarseQuery: MediaQueryList | null = null;
 
   // Pre-allocated scratch math objects (zero-GC inside animation loop)
   private readonly _forward = new THREE.Vector3();
@@ -142,7 +167,7 @@ export class TumbbadEngine {
     });
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.12;
+    this.renderer.toneMappingExposure = 1.06;
     this.renderer.setPixelRatio(
       this.isSoftwareGl ? 1 : Math.min(window.devicePixelRatio || 1, 2)
     );
@@ -154,13 +179,13 @@ export class TumbbadEngine {
     container.appendChild(this.renderer.domElement);
 
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0x050203);
-    this.scene.fog = new THREE.FogExp2(0x070304, 0.038);
+    this.scene.background = new THREE.Color(0x040202);
+    this.scene.fog = new THREE.FogExp2(0x060203, 0.044);
 
     const pmremGenerator = new THREE.PMREMGenerator(this.renderer);
     this.envRT = pmremGenerator.fromScene(new RoomEnvironment(), 0.04);
     this.scene.environment = this.envRT.texture;
-    this.scene.environmentIntensity = 0.25;
+    this.scene.environmentIntensity = 0.22;
     pmremGenerator.dispose();
 
     const w = container.clientWidth || window.innerWidth;
@@ -180,25 +205,25 @@ export class TumbbadEngine {
     this.camera.add(this.lantern.spotTarget);
     this.lantern.spotLight.target = this.lantern.spotTarget;
 
-    // Warm/cool atmospheric lighting
-    const hemiLight = new THREE.HemisphereLight(0x3a4866, 0x330809, 0.62);
+    // Warm/cool atmospheric lighting (dimmer & moodier for horror)
+    const hemiLight = new THREE.HemisphereLight(0x2f3b58, 0x2d0507, 0.5);
     this.scene.add(hemiLight);
 
-    const moonKey = new THREE.DirectionalLight(0x7c96bd, 0.72);
-    moonKey.position.set(-16, 26, 12);
+    this.moonKey = new THREE.DirectionalLight(0x7c96bd, 0.65);
+    this.moonKey.position.set(-16, 26, 12);
     if (!this.isSoftwareGl) {
-      moonKey.castShadow = true;
-      moonKey.shadow.mapSize.set(1024, 1024);
-      moonKey.shadow.camera.left = -22;
-      moonKey.shadow.camera.right = 22;
-      moonKey.shadow.camera.top = 22;
-      moonKey.shadow.camera.bottom = -22;
-      moonKey.shadow.camera.near = 1;
-      moonKey.shadow.camera.far = 65;
-      moonKey.shadow.bias = -0.0005;
-      moonKey.shadow.normalBias = 0.02;
+      this.moonKey.castShadow = true;
+      this.moonKey.shadow.mapSize.set(1024, 1024);
+      this.moonKey.shadow.camera.left = -22;
+      this.moonKey.shadow.camera.right = 22;
+      this.moonKey.shadow.camera.top = 22;
+      this.moonKey.shadow.camera.bottom = -22;
+      this.moonKey.shadow.camera.near = 1;
+      this.moonKey.shadow.camera.far = 65;
+      this.moonKey.shadow.bias = -0.0005;
+      this.moonKey.shadow.normalBias = 0.02;
     }
-    this.scene.add(moonKey);
+    this.scene.add(this.moonKey);
 
     this.textures = createProceduralTextures(this.renderer.capabilities.getMaxAnisotropy());
     this.buildEnvironment();
@@ -209,6 +234,7 @@ export class TumbbadEngine {
     this.scene.add(this.hastar.group);
 
     this.spawnCoins();
+    this.refreshInputMode(false);
     this.bindEvents();
 
     if (!this.isSoftwareGl) {
@@ -301,7 +327,7 @@ export class TumbbadEngine {
       brazier.position.set(bx, 0, 4.15);
       this.scene.add(brazier);
     }
-    const stairBeacon = new THREE.PointLight(0xff7733, 2.8, 16, 1.4);
+    const stairBeacon = new THREE.PointLight(0xff7733, 2.6, 16, 1.4);
     stairBeacon.position.set(0, 2.2, 3.6);
     this.scene.add(stairBeacon);
 
@@ -356,7 +382,7 @@ export class TumbbadEngine {
     }
 
     // Crimson glow rising from the pit shaft
-    const pitGlow = new THREE.PointLight(0xe01b1b, 3.4, 24, 1.3);
+    const pitGlow = new THREE.PointLight(0xe01b1b, 3.2, 24, 1.3);
     pitGlow.position.set(0, -3.5, -1.5);
     this.scene.add(pitGlow);
 
@@ -395,17 +421,19 @@ export class TumbbadEngine {
       this.scene.add(col);
     }
 
-    // Strategic crimson womb lights (budget <= 5 unshadowed cavern point lights)
-    const wombLights = [
-      { x: 0, y: -8.5, z: -18, i: 2.0 },
-      { x: -16, y: -8, z: -6, i: 1.7 },
-      { x: 16, y: -8, z: -6, i: 1.7 },
-      { x: 0, y: -8, z: 14, i: 1.8 },
+    // Strategic pulsing crimson womb lights (budget <= 5 unshadowed cavern point lights)
+    const wombLightSpecs = [
+      { x: 0, y: -8.5, z: -18, i: 1.75 },
+      { x: -16, y: -8, z: -6, i: 1.45 },
+      { x: 16, y: -8, z: -6, i: 1.45 },
+      { x: 0, y: -8, z: 14, i: 1.55 },
     ];
-    for (const wl of wombLights) {
-      const pl = new THREE.PointLight(0xd91414, wl.i, 28, 1.6);
+    for (const wl of wombLightSpecs) {
+      const pl = new THREE.PointLight(0xd91414, wl.i, 26, 1.65);
       pl.position.set(wl.x, wl.y, wl.z);
+      pl.userData.baseIntensity = wl.i;
       this.scene.add(pl);
+      this.wombLights.push(pl);
     }
   }
 
@@ -478,13 +506,74 @@ export class TumbbadEngine {
   }
 
   // ============================================================================
+  // AUTOMATIC DESKTOP / MOBILE DETECTION & TOUCH CONTROL API
+  // ============================================================================
+  private refreshInputMode(emit: boolean): void {
+    const hasCoarsePointer =
+      typeof window.matchMedia === 'function' && window.matchMedia('(pointer: coarse)').matches;
+    const maxTouchPoints = typeof navigator !== 'undefined' ? navigator.maxTouchPoints || 0 : 0;
+    const viewportWidth = this.container.clientWidth || window.innerWidth;
+
+    const nextMode = detectAutoInputMode({
+      hasCoarsePointer,
+      maxTouchPoints,
+      viewportWidth,
+      recentTouch: this.recentTouch,
+    });
+
+    if (nextMode !== this.inputMode || !document.body.dataset.inputMode) {
+      this.inputMode = nextMode;
+      document.body.dataset.inputMode = nextMode;
+      if (nextMode === 'mobile') {
+        this.exitPointerLock();
+      }
+      if (emit) {
+        this.emitHud(true);
+      }
+    }
+  }
+
+  setTouchMove(x: number, y: number): void {
+    this.touchMoveX = Math.max(-1, Math.min(1, x));
+    this.touchMoveY = Math.max(-1, Math.min(1, y));
+  }
+
+  applyLookDelta(dx: number, dy: number): void {
+    if (this.phase !== 'playing' || this.capturingTimer > 0) return;
+    const sensitivity = 0.0042;
+    this.yawObject.rotation.y -= dx * sensitivity;
+    this.pitchObject.rotation.x -= dy * sensitivity;
+    this.pitchObject.rotation.x = Math.max(
+      -Math.PI / 2.1,
+      Math.min(Math.PI / 2.1, this.pitchObject.rotation.x)
+    );
+  }
+
+  setTouchSprint(active: boolean): void {
+    this.touchSprint = active;
+    if (active && this.isCrouching) {
+      this.isCrouching = false;
+    }
+    this.emitHud(true);
+  }
+
+  toggleCrouch(): void {
+    if (this.phase !== 'playing' || this.capturingTimer > 0) return;
+    this.isCrouching = !this.isCrouching;
+    if (this.isCrouching) {
+      this.touchSprint = false;
+    }
+    this.emitHud(true);
+  }
+
+  // ============================================================================
   // PUBLIC GAME LIFECYCLE CONTROLS
   // ============================================================================
   startNewRun(requestLock = true): void {
     this.sound.init();
     this.resetSimulation();
     this.setPhase('playing');
-    if (requestLock) {
+    if (requestLock && this.inputMode === 'desktop') {
       this.tryRequestPointerLock();
     }
   }
@@ -493,12 +582,17 @@ export class TumbbadEngine {
     if (this.phase !== 'paused') return;
     this.sound.init();
     this.setPhase('playing');
-    this.tryRequestPointerLock();
+    if (this.inputMode === 'desktop') {
+      this.tryRequestPointerLock();
+    }
   }
 
   pauseGame(): void {
     if (this.phase !== 'playing') return;
     this.keysPressed.clear();
+    this.touchMoveX = 0;
+    this.touchMoveY = 0;
+    this.touchSprint = false;
     this.exitPointerLock();
     this.sound.silenceAmbience();
     this.setPhase('paused');
@@ -506,6 +600,9 @@ export class TumbbadEngine {
 
   returnToTitle(): void {
     this.keysPressed.clear();
+    this.touchMoveX = 0;
+    this.touchMoveY = 0;
+    this.touchSprint = false;
     this.exitPointerLock();
     this.sound.silenceAmbience();
     this.resetSimulation();
@@ -525,6 +622,7 @@ export class TumbbadEngine {
   }
 
   private tryRequestPointerLock(): void {
+    if (this.inputMode === 'mobile') return;
     try {
       const el = this.renderer.domElement;
       if (document.pointerLockElement !== el && typeof el.requestPointerLock === 'function') {
@@ -554,10 +652,24 @@ export class TumbbadEngine {
     this.decoysUsed = 0;
     this.isCrouching = false;
     this.isSprinting = false;
+    this.touchSprint = false;
+    this.touchMoveX = 0;
+    this.touchMoveY = 0;
     this.elapsedSeconds = 0;
     this.stepAccumulator = 0;
     this.distanceBob = 0;
     this.keysPressed.clear();
+
+    // Reset horror & jumpscare timers
+    this.horrorTension = 0;
+    this.cameraTrauma = 0;
+    this.jumpscareTimer = 0;
+    this.jumpscareKind = null;
+    this.ambushCooldown = 3.0;
+    this.capturingTimer = 0;
+    this.captureReason = '';
+    this.lightningFlash = 0;
+    this.nextLightningTimer = 7.0;
 
     // Spawn facing north toward the glowing central pit staircase!
     this.yawObject.position.set(0, EYE_HEIGHT_STAND, 13.0);
@@ -565,9 +677,12 @@ export class TumbbadEngine {
     this.pitchObject.rotation.set(-0.08, 0, 0);
     this.camera.position.set(0, 0, 0);
     this.camera.rotation.set(0, 0, 0);
+    this.camera.fov = 70;
+    this.camera.updateProjectionMatrix();
 
     // Reset Hastar inside the cavern
     this.hastar.group.position.set(0, -14, -18);
+    this.hastar.group.rotation.set(0, 0, 0);
     this.monsterState = 'PATROL';
     this.wpIndex = 0;
     this.lightExposure = 0;
@@ -585,6 +700,12 @@ export class TumbbadEngine {
   // INPUT & WINDOW EVENTS
   // ============================================================================
   private onKeyDown = (e: KeyboardEvent): void => {
+    // Physical keyboard input confirms desktop mode unless viewport is strictly phone-sized
+    if (this.recentTouch && (this.container.clientWidth || window.innerWidth) > 768) {
+      this.recentTouch = false;
+      this.refreshInputMode(true);
+    }
+
     if (e.code === 'KeyM') {
       this.toggleMute();
       return;
@@ -609,7 +730,7 @@ export class TumbbadEngine {
       return;
     }
 
-    if (this.phase !== 'playing') return;
+    if (this.phase !== 'playing' || this.capturingTimer > 0) return;
 
     if (e.code === 'Escape' || e.code === 'KeyP') {
       e.preventDefault();
@@ -625,8 +746,7 @@ export class TumbbadEngine {
 
     if (!e.repeat) {
       if (e.code === 'KeyC') {
-        this.isCrouching = !this.isCrouching;
-        this.emitHud(true);
+        this.toggleCrouch();
       } else if (e.code === 'KeyF') {
         this.throwDoughDecoy();
       } else if (e.code === 'KeyE') {
@@ -642,7 +762,13 @@ export class TumbbadEngine {
   };
 
   private onMouseMove = (e: MouseEvent): void => {
-    if (this.phase !== 'playing') return;
+    if (performance.now() - this.lastTouchTimestamp > 700 && this.recentTouch) {
+      if ((this.container.clientWidth || window.innerWidth) > 768) {
+        this.recentTouch = false;
+        this.refreshInputMode(true);
+      }
+    }
+    if (this.phase !== 'playing' || this.capturingTimer > 0) return;
     if (document.pointerLockElement !== this.renderer.domElement) return;
     const sensitivity = 0.0022;
     this.yawObject.rotation.y -= e.movementX * sensitivity;
@@ -653,20 +779,40 @@ export class TumbbadEngine {
     );
   };
 
+  private onTouchDetect = (): void => {
+    this.lastTouchTimestamp = performance.now();
+    if (!this.recentTouch) {
+      this.recentTouch = true;
+      this.refreshInputMode(true);
+    }
+  };
+
+  private onPointerMediaChange = (): void => {
+    this.refreshInputMode(true);
+  };
+
   private onCanvasClick = (): void => {
     if (this.phase === 'playing') {
       this.sound.init();
-      this.tryRequestPointerLock();
+      if (this.inputMode === 'desktop') {
+        this.tryRequestPointerLock();
+      }
     }
   };
 
   private onWindowBlur = (): void => {
     this.keysPressed.clear();
+    this.touchMoveX = 0;
+    this.touchMoveY = 0;
+    this.touchSprint = false;
   };
 
   private onVisibilityChange = (): void => {
     if (document.hidden) {
       this.keysPressed.clear();
+      this.touchMoveX = 0;
+      this.touchMoveY = 0;
+      this.touchSprint = false;
     }
   };
 
@@ -676,6 +822,7 @@ export class TumbbadEngine {
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(w, h);
+    this.refreshInputMode(true);
   };
 
   private onContextLost = (e: Event): void => {
@@ -691,9 +838,14 @@ export class TumbbadEngine {
     window.addEventListener('keydown', this.onKeyDown);
     window.addEventListener('keyup', this.onKeyUp);
     window.addEventListener('mousemove', this.onMouseMove);
+    window.addEventListener('touchstart', this.onTouchDetect, { passive: true });
     window.addEventListener('blur', this.onWindowBlur);
     document.addEventListener('visibilitychange', this.onVisibilityChange);
     window.addEventListener('resize', this.onResize);
+    if (typeof window.matchMedia === 'function') {
+      this.coarseQuery = window.matchMedia('(pointer: coarse)');
+      this.coarseQuery.addEventListener?.('change', this.onPointerMediaChange);
+    }
     this.renderer.domElement.addEventListener('click', this.onCanvasClick);
     this.renderer.domElement.addEventListener('webglcontextlost', this.onContextLost);
     this.renderer.domElement.addEventListener('webglcontextrestored', this.onContextRestored);
@@ -703,7 +855,7 @@ export class TumbbadEngine {
   // GAMEPLAY INTERACTIONS & DECOYS
   // ============================================================================
   throwDoughDecoy(): void {
-    if (this.phase !== 'playing' || this.decoysRemaining <= 0) return;
+    if (this.phase !== 'playing' || this.decoysRemaining <= 0 || this.capturingTimer > 0) return;
     this.decoysRemaining--;
     this.decoysUsed++;
     this.sound.playThrow();
@@ -729,7 +881,8 @@ export class TumbbadEngine {
     this.emitHud(true);
   }
 
-  private tryInteract(): void {
+  tryInteract(): void {
+    if (this.phase !== 'playing' || this.capturingTimer > 0) return;
     if (this.nearbyCoin) {
       this.nearbyCoin.collected = true;
       this.scene.remove(this.nearbyCoin.group);
@@ -737,18 +890,25 @@ export class TumbbadEngine {
       this.sound.playCoinChime();
       this.emitHud(true);
     } else if (this.nearExitDoor && canUnlockExit(this.coinsCollected)) {
-      this.triggerEnd('victory', 'You climbed out of the crimson womb into the pouring monsoon clutching your stolen Mudras, barring the ancestral gates behind you.');
+      this.triggerEnd(
+        'victory',
+        'You climbed out of the crimson womb into the pouring monsoon clutching your stolen Mudras, barring the ancestral gates behind you.'
+      );
     }
   }
 
   private triggerEnd(outcome: 'victory' | 'defeat', reason: string): void {
     this.keysPressed.clear();
+    this.touchMoveX = 0;
+    this.touchMoveY = 0;
+    this.touchSprint = false;
+    this.jumpscareTimer = 0;
+    this.jumpscareKind = null;
+    this.capturingTimer = 0;
     this.exitPointerLock();
     this.sound.silenceAmbience();
     if (outcome === 'victory') {
       this.sound.playCoinChime();
-    } else {
-      this.sound.playMonsterShriek();
     }
 
     const summary: RunSummary = {
@@ -779,18 +939,28 @@ export class TumbbadEngine {
       if (this.phase === 'title') {
         this.simTime += dt;
         this.updateRain(dt);
+        this.updateAtmosphereAndLightning(dt, this.simTime);
         this.updateLanternFlicker(this.simTime);
         this.updateTitleTour(this.simTime);
+        (this.scene.fog as THREE.FogExp2).density = 0.032;
       } else if (this.phase === 'playing') {
         this.simTime += dt;
         this.elapsedSeconds += Math.min(rawDt, 0.25);
         this.updateRain(dt);
+        this.updateAtmosphereAndLightning(dt, this.simTime);
         this.updateLanternFlicker(this.simTime);
         this.updateCoins(dt);
-        this.updatePlayer(dt);
-        this.checkInteractions();
-        this.updateMonsterAndDecoys(dt, this.simTime);
-        this.emitHud(false);
+
+        if (this.capturingTimer > 0) {
+          this.updateCaptureJumpscare(dt, this.simTime);
+          this.emitHud(false);
+        } else {
+          this.updatePlayer(dt);
+          this.checkInteractions();
+          this.updateMonsterAndDecoys(dt, this.simTime);
+          this.updateCameraHorrorEffects(dt);
+          this.emitHud(false);
+        }
       }
 
       this.renderer.render(this.scene, this.camera);
@@ -839,20 +1009,56 @@ export class TumbbadEngine {
   private updateTitleTour(t: number): void {
     const angle = t * 0.14;
     this.yawObject.position.set(
-      Math.sin(angle) * 11.5,
-      4.4 + Math.sin(t * 0.4) * 0.35,
-      Math.cos(angle) * 11.5
+      Math.sin(angle) * 9.0,
+      3.5 + Math.sin(t * 0.4) * 0.25,
+      Math.cos(angle) * 9.0
     );
     this.yawObject.rotation.y = angle;
-    this.pitchObject.rotation.x = -0.34;
+    this.pitchObject.rotation.x = -0.26;
     this.lantern.group.visible = false;
+  }
+
+  private updateAtmosphereAndLightning(dt: number, elapsedTime: number): void {
+    // Organic breathing pulse of the crimson womb lights
+    for (let i = 0; i < this.wombLights.length; i++) {
+      const wl = this.wombLights[i];
+      const base = (wl.userData.baseIntensity as number) || 1.5;
+      wl.intensity = base * (0.78 + Math.sin(elapsedTime * 2.3 + i * 1.4) * 0.25);
+    }
+
+    // Monsoon thunder & lightning flashes
+    this.nextLightningTimer -= dt;
+    if (this.nextLightningTimer <= 0) {
+      this.lightningFlash = 1.0;
+      this.nextLightningTimer = 9 + Math.random() * 8;
+      if (this.phase === 'playing') {
+        this.sound.playThunder(computeDepthFactor(this.yawObject.position.y));
+      }
+    }
+
+    if (this.lightningFlash > 0) {
+      this.lightningFlash = Math.max(0, this.lightningFlash - dt * 2.8);
+      const pulse = this.lightningFlash > 0.72 || (this.lightningFlash > 0.35 && this.lightningFlash < 0.52)
+        ? 1
+        : 0.15;
+      this.moonKey.intensity = 0.65 + pulse * 3.6 * this.lightningFlash;
+    } else {
+      this.moonKey.intensity = 0.65;
+    }
   }
 
   private updateLanternFlicker(t: number): void {
     this.lantern.group.visible = this.phase === 'playing' || this.phase === 'paused';
-    const flicker = 1.0 + Math.sin(t * 19) * 0.055 + Math.sin(t * 31) * 0.035;
-    this.lantern.ambientLight.intensity = 1.4 * flicker;
-    this.lantern.spotLight.intensity = 2.8 * flicker;
+    const captureOut = this.capturingTimer > 0 ? 0.12 : 1;
+    const horrorSputter =
+      this.horrorTension > 0.55 || this.monsterState === 'CHASE'
+        ? Math.sin(t * 47) * Math.sin(t * 73) > 0.48
+          ? 0.28
+          : 1.0
+        : 1.0;
+    const flicker = (1.0 + Math.sin(t * 19) * 0.065 + Math.sin(t * 31) * 0.045) * horrorSputter * captureOut;
+    this.lantern.ambientLight.intensity = 1.35 * flicker;
+    this.lantern.spotLight.intensity = 2.75 * flicker;
     this.lantern.flameCore.scale.set(0.85 * flicker, 1.35 * flicker, 0.85 * flicker);
   }
 
@@ -882,14 +1088,23 @@ export class TumbbadEngine {
       this._moveDir.sub(this._right);
     }
 
-    // Optional keyboard look for accessibility (Q/E? No, E is interact; ArrowLeft/Right move, J/L look)
+    // Merge virtual touch joystick vector (touchMoveY > 0 moves forward, touchMoveX > 0 strafes right)
+    if (Math.abs(this.touchMoveX) > 0.05 || Math.abs(this.touchMoveY) > 0.05) {
+      this._moveDir.addScaledVector(this._forward, this.touchMoveY);
+      this._moveDir.addScaledVector(this._right, this.touchMoveX);
+    }
+
+    // Optional keyboard look for accessibility
     if (this.keysPressed.has('KeyQ')) {
       this.yawObject.rotation.y += 1.65 * dt;
     }
 
-    const isMoving = this._moveDir.lengthSq() > 0;
+    const isMoving = this._moveDir.lengthSq() > 0.002;
     const wantsSprint =
-      (this.keysPressed.has('ShiftLeft') || this.keysPressed.has('ShiftRight')) && isMoving;
+      (this.keysPressed.has('ShiftLeft') ||
+        this.keysPressed.has('ShiftRight') ||
+        this.touchSprint) &&
+      isMoving;
 
     if (wantsSprint && this.isCrouching) {
       this.isCrouching = false;
@@ -900,21 +1115,22 @@ export class TumbbadEngine {
       this.emitHud(true);
     }
 
-    let moveSpeed = 4.6;
-    if (this.isCrouching) moveSpeed = 2.35;
-    else if (this.isSprinting) moveSpeed = 8.0;
+    let moveSpeed: number = PLAYER_SPEEDS.WALK;
+    if (this.isCrouching) moveSpeed = PLAYER_SPEEDS.CROUCH;
+    else if (this.isSprinting) moveSpeed = PLAYER_SPEEDS.SPRINT;
 
     const eyeHeight = this.isCrouching ? EYE_HEIGHT_CROUCH : EYE_HEIGHT_STAND;
     const currentFootY = this.yawObject.position.y - eyeHeight;
 
     if (isMoving) {
+      const mag = Math.min(1, this._moveDir.length());
       this._moveDir.normalize();
-      const stepDist = moveSpeed * dt;
+      const stepDist = moveSpeed * mag * dt;
       this.yawObject.position.addScaledVector(this._moveDir, stepDist);
       this.distanceBob += stepDist;
 
       this.stepAccumulator += stepDist;
-      const stepThreshold = this.isSprinting ? 2.3 : 1.9;
+      const stepThreshold = this.isSprinting ? 2.2 : 1.85;
       if (this.stepAccumulator >= stepThreshold) {
         this.stepAccumulator = 0;
         if (!this.isCrouching) {
@@ -922,12 +1138,14 @@ export class TumbbadEngine {
         }
       }
 
+      const baseLanternX = Math.min(0.36, 0.14 + this.camera.aspect * 0.18);
       // Gait-synced lantern bobbing
       this.lantern.group.position.y = -0.32 + Math.sin(this.distanceBob * 3.1) * 0.026;
-      this.lantern.group.position.x = 0.36 + Math.cos(this.distanceBob * 1.55) * 0.018;
+      this.lantern.group.position.x = baseLanternX + Math.cos(this.distanceBob * 1.55) * 0.018;
     } else {
+      const baseLanternX = Math.min(0.36, 0.14 + this.camera.aspect * 0.18);
       this.lantern.group.position.y = THREE.MathUtils.damp(this.lantern.group.position.y, -0.32, 8, dt);
-      this.lantern.group.position.x = THREE.MathUtils.damp(this.lantern.group.position.x, 0.36, 8, dt);
+      this.lantern.group.position.x = THREE.MathUtils.damp(this.lantern.group.position.x, baseLanternX, 8, dt);
     }
 
     resolveWorldConstraints(this.yawObject.position, currentFootY);
@@ -940,10 +1158,10 @@ export class TumbbadEngine {
     const targetEyeY = targetFloorY + eyeHeight;
     this.yawObject.position.y = THREE.MathUtils.damp(this.yawObject.position.y, targetEyeY, 14, dt);
 
-    // Depth-modulated fog density (heavier inside crimson womb)
+    // Thicker horror fog density inside crimson womb
     const depth = computeDepthFactor(this.yawObject.position.y);
     const fog = this.scene.fog as THREE.FogExp2;
-    fog.density = THREE.MathUtils.lerp(0.036, 0.048, depth);
+    fog.density = THREE.MathUtils.lerp(0.044, 0.066, depth);
   }
 
   private checkInteractions(): void {
@@ -952,13 +1170,13 @@ export class TumbbadEngine {
     const pPos = this.yawObject.position;
 
     for (const c of this.coins) {
-      if (!c.collected && pPos.distanceTo(c.group.position) < 2.75) {
+      if (!c.collected && pPos.distanceTo(c.group.position) < 2.85) {
         this.nearbyCoin = c;
         break;
       }
     }
 
-    if (pPos.distanceTo(this._exitDoorVec) < 3.65) {
+    if (pPos.distanceTo(this._exitDoorVec) < 3.75) {
       this.nearExitDoor = true;
     }
   }
@@ -966,6 +1184,15 @@ export class TumbbadEngine {
   private updateMonsterAndDecoys(dt: number, elapsedTime: number): void {
     const pPos = this.yawObject.position;
     const mPos = this.hastar.group.position;
+
+    this.ambushCooldown = Math.max(0, this.ambushCooldown - dt);
+    if (this.jumpscareTimer > 0) {
+      this.jumpscareTimer = Math.max(0, this.jumpscareTimer - dt);
+      if (this.jumpscareTimer === 0) {
+        this.jumpscareKind = null;
+        this.emitHud(true);
+      }
+    }
 
     let activeDecoyTarget: DecoyEntity | null = null;
     for (let i = this.activeDecoys.length - 1; i >= 0; i--) {
@@ -995,6 +1222,16 @@ export class TumbbadEngine {
 
     const distToPlayerXZ = Math.hypot(pPos.x - mPos.x, pPos.z - mPos.z);
     const playerInCavern = pPos.y < -4.5;
+    const isMoving =
+      this.keysPressed.has('KeyW') ||
+      this.keysPressed.has('KeyS') ||
+      this.keysPressed.has('KeyA') ||
+      this.keysPressed.has('KeyD') ||
+      this.keysPressed.has('ArrowUp') ||
+      this.keysPressed.has('ArrowDown') ||
+      this.keysPressed.has('ArrowLeft') ||
+      this.keysPressed.has('ArrowRight') ||
+      Math.hypot(this.touchMoveX, this.touchMoveY) > 0.1;
 
     this.camera.getWorldDirection(this._camDir);
     this._monsterHeadPos.set(mPos.x, mPos.y + 2.4, mPos.z);
@@ -1015,11 +1252,14 @@ export class TumbbadEngine {
       distToPlayer3D,
       lookDot,
       isSprinting: this.isSprinting,
+      isCrouching: this.isCrouching,
+      isMoving,
       hasActiveDecoy: activeDecoyTarget !== null,
     });
 
     if (evalRes.triggeredChase) {
       this.sound.playMonsterShriek();
+      this.cameraTrauma = Math.max(this.cameraTrauma, 0.55);
     }
 
     const prevState = this.monsterState;
@@ -1027,27 +1267,52 @@ export class TumbbadEngine {
     this.lightExposure = evalRes.lightExposure;
     this.alertTimer = evalRes.alertTimer;
 
-    // Move monster toward target
+    this.horrorTension = computeHorrorTension({
+      monsterState: this.monsterState,
+      distToPlayerXZ,
+      playerInCavern,
+      lightExposureRatio: Math.min(1, this.lightExposure / 1.05),
+    });
+
+    // Ambush Jumpscare shock event when Hastar suddenly rushes from the dark
+    if (
+      shouldTriggerAmbushJumpscare({
+        triggeredChase: evalRes.triggeredChase,
+        monsterState: this.monsterState,
+        distToPlayerXZ,
+        cooldownRemaining: this.ambushCooldown,
+        playerInCavern,
+      })
+    ) {
+      this.ambushCooldown = 12.0;
+      this.jumpscareTimer = 0.45;
+      this.jumpscareKind = 'ambush';
+      this.cameraTrauma = 0.92;
+      this.sound.playJumpscareScream(0.8);
+      this.emitHud(true);
+    }
+
+    // Move monster toward target with increased horror speed
     const wp = MONSTER_WAYPOINTS[this.wpIndex];
     let targetX = wp.x;
     let targetZ = wp.z;
-    let speed = 3.6;
+    let speed: number = MONSTER_SPEEDS.PATROL;
 
     if (this.monsterState === 'DECOY' && activeDecoyTarget) {
       targetX = activeDecoyTarget.group.position.x;
       targetZ = activeDecoyTarget.group.position.z;
-      speed = 8.2;
+      speed = MONSTER_SPEEDS.DECOY;
     } else if (this.monsterState === 'CHASE') {
       targetX = pPos.x;
       targetZ = pPos.z;
-      speed = 6.6;
+      speed = MONSTER_SPEEDS.CHASE;
     }
 
     const dx = targetX - mPos.x;
     const dz = targetZ - mPos.z;
     const distToTarget = Math.hypot(dx, dz);
 
-    if (distToTarget > 0.4) {
+    if (distToTarget > 0.35) {
       const moveStep = Math.min(distToTarget, speed * dt);
       mPos.x += (dx / distToTarget) * moveStep;
       mPos.z += (dz / distToTarget) * moveStep;
@@ -1056,17 +1321,29 @@ export class TumbbadEngine {
       this.wpIndex = (this.wpIndex + 1) % MONSTER_WAYPOINTS.length;
     }
 
-    mPos.y = -14.0 + Math.abs(Math.sin(elapsedTime * speed * 1.5)) * 0.22;
-    this.hastar.leftArm.rotation.x = -0.35 + Math.sin(elapsedTime * speed * 2) * 0.55;
-    this.hastar.rightArm.rotation.x = -0.35 - Math.sin(elapsedTime * speed * 2) * 0.55;
-    this.hastar.head.rotation.z = Math.sin(elapsedTime * 3.1) * 0.08;
-    this.hastar.auraLight.intensity = this.monsterState === 'CHASE' ? 2.8 : 1.7;
+    // Aggressive, unsettling stalker animation
+    const strideFreq = speed * 1.65;
+    mPos.y = -14.0 + Math.abs(Math.sin(elapsedTime * strideFreq)) * 0.28;
+    this.hastar.leftArm.rotation.x = -0.45 + Math.sin(elapsedTime * speed * 2.1) * 0.72;
+    this.hastar.rightArm.rotation.x = -0.45 - Math.sin(elapsedTime * speed * 2.1) * 0.72;
+    this.hastar.head.rotation.z =
+      Math.sin(elapsedTime * 5.2) * 0.16 +
+      (this.monsterState === 'CHASE' ? Math.sin(elapsedTime * 29) * 0.1 : 0);
+    this.hastar.auraLight.intensity = this.monsterState === 'CHASE' ? 3.4 : 2.0;
 
     if (isPlayerCaptured(this.monsterState, distToPlayerXZ, pPos.y, mPos.y)) {
-      const reason = evalRes.lightDetected
+      this.captureReason = evalRes.lightDetected
         ? "You lingered your lantern light upon Hastar's cursed face. He lunged from the crimson dark."
-        : 'Hastar heard your footsteps echoing through the womb and dragged you into the dark.';
-      this.triggerEnd('defeat', reason);
+        : 'Hastar tore out of the crimson fog and dragged you into the womb.';
+      this.capturingTimer = 0.85;
+      this.jumpscareTimer = 0.85;
+      this.jumpscareKind = 'capture';
+      this.cameraTrauma = 1.0;
+      this.keysPressed.clear();
+      this.touchMoveX = 0;
+      this.touchMoveY = 0;
+      this.sound.playJumpscareScream(1.1);
+      this.emitHud(true);
       return;
     }
 
@@ -1077,18 +1354,86 @@ export class TumbbadEngine {
     }
   }
 
+  private updateCaptureJumpscare(dt: number, elapsedTime: number): void {
+    this.capturingTimer = Math.max(0, this.capturingTimer - dt);
+    this.jumpscareTimer = this.capturingTimer;
+
+    // Lunge Hastar directly in front of the player's eyes with violent shake
+    const pPos = this.yawObject.position;
+    this._forward.set(0, 0, -1).applyAxisAngle(this._upAxis, this.yawObject.rotation.y);
+    const lungeX = pPos.x + this._forward.x * 1.15;
+    const lungeZ = pPos.z + this._forward.z * 1.15;
+    const lungeY = pPos.y - 2.95 + Math.sin(elapsedTime * 42) * 0.08;
+
+    this.hastar.group.position.x = THREE.MathUtils.damp(this.hastar.group.position.x, lungeX, 24, dt);
+    this.hastar.group.position.z = THREE.MathUtils.damp(this.hastar.group.position.z, lungeZ, 24, dt);
+    this.hastar.group.position.y = THREE.MathUtils.damp(this.hastar.group.position.y, lungeY, 24, dt);
+    this.hastar.group.rotation.y = this.yawObject.rotation.y + Math.PI;
+    this.hastar.leftArm.rotation.x = -1.6 + Math.sin(elapsedTime * 36) * 0.25;
+    this.hastar.rightArm.rotation.x = -1.6 - Math.sin(elapsedTime * 36) * 0.25;
+    this.hastar.head.rotation.z = Math.sin(elapsedTime * 55) * 0.24;
+    this.hastar.auraLight.intensity = 5.5;
+
+    // Snap camera level toward Hastar's roaring face
+    this.pitchObject.rotation.x = THREE.MathUtils.damp(this.pitchObject.rotation.x, 0.06, 18, dt);
+    this.cameraTrauma = 1.0;
+    this.updateCameraHorrorEffects(dt);
+
+    if (this.capturingTimer <= 0) {
+      this.triggerEnd('defeat', this.captureReason);
+    }
+  }
+
+  private updateCameraHorrorEffects(dt: number): void {
+    // Decay trauma smoothly
+    const ambientDread = this.monsterState === 'CHASE' ? 0.22 : this.horrorTension * 0.08;
+    this.cameraTrauma = Math.max(ambientDread, this.cameraTrauma - dt * 1.35);
+    const shake = this.cameraTrauma * this.cameraTrauma;
+
+    if (shake > 0.001) {
+      const t = this.simTime;
+      this.camera.rotation.z = Math.sin(t * 43) * 0.065 * shake;
+      this.camera.rotation.x = Math.cos(t * 51) * 0.045 * shake;
+      this.camera.rotation.y = Math.sin(t * 37) * 0.045 * shake;
+    } else {
+      this.camera.rotation.set(0, 0, 0);
+    }
+
+    // Dynamic FOV dread kick (widens on sprint/chase, punches inward on capture jumpscare)
+    const targetFov =
+      this.capturingTimer > 0
+        ? 54
+        : this.jumpscareKind === 'ambush' && this.jumpscareTimer > 0
+        ? 82
+        : this.monsterState === 'CHASE' || this.isSprinting
+        ? 75
+        : 70;
+    if (Math.abs(this.camera.fov - targetFov) > 0.05) {
+      this.camera.fov = THREE.MathUtils.damp(this.camera.fov, targetFov, 12, dt);
+      this.camera.updateProjectionMatrix();
+    }
+  }
+
   private emitHud(force: boolean): void {
     const now = performance.now();
     if (!force && now - this.lastHudEmit < 100) return;
     this.lastHudEmit = now;
 
+    const interactVerb = this.inputMode === 'mobile' ? 'Tap Take' : '[E]';
+    const unlockVerb = this.inputMode === 'mobile' ? 'Tap Unlock' : '[E]';
+
     let promptText: string | null = null;
+    let canInteract = false;
     if (this.nearbyCoin) {
-      promptText = '[E] Take Gold Mudra';
+      promptText = `${interactVerb} Gold Mudra`;
+      canInteract = true;
     } else if (this.nearExitDoor) {
-      promptText = canUnlockExit(this.coinsCollected)
-        ? '[E] Unlock Mansion Gates & Escape'
-        : `Locked — Collect ${REQUIRED_COINS} Gold Mudras (${this.coinsCollected}/${REQUIRED_COINS})`;
+      if (canUnlockExit(this.coinsCollected)) {
+        promptText = `${unlockVerb} Mansion Gates & Escape`;
+        canInteract = true;
+      } else {
+        promptText = `Locked — Collect ${REQUIRED_COINS} Gold Mudras (${this.coinsCollected}/${REQUIRED_COINS})`;
+      }
     }
 
     const activeDecoy = this.activeDecoys.length > 0 ? this.activeDecoys[this.activeDecoys.length - 1] : null;
@@ -1104,10 +1449,15 @@ export class TumbbadEngine {
       monsterState: this.monsterState,
       decoyTimeLeft,
       lightWarning: this.lightExposure > 0.08 && this.monsterState !== 'DECOY',
-      lightExposureRatio: Math.min(1, this.lightExposure / 1.15),
+      lightExposureRatio: Math.min(1, this.lightExposure / 1.05),
       promptText,
+      canInteract,
       inCavern: this.yawObject.position.y < -4.5,
       elapsedSeconds: this.elapsedSeconds,
+      inputMode: this.inputMode,
+      jumpscareActive: this.jumpscareTimer > 0,
+      jumpscareKind: this.jumpscareTimer > 0 ? this.jumpscareKind : null,
+      horrorTension: this.horrorTension,
     });
   }
 
@@ -1119,9 +1469,11 @@ export class TumbbadEngine {
     window.removeEventListener('keydown', this.onKeyDown);
     window.removeEventListener('keyup', this.onKeyUp);
     window.removeEventListener('mousemove', this.onMouseMove);
+    window.removeEventListener('touchstart', this.onTouchDetect);
     window.removeEventListener('blur', this.onWindowBlur);
     document.removeEventListener('visibilitychange', this.onVisibilityChange);
     window.removeEventListener('resize', this.onResize);
+    this.coarseQuery?.removeEventListener?.('change', this.onPointerMediaChange);
     this.renderer.domElement.removeEventListener('click', this.onCanvasClick);
     this.renderer.domElement.removeEventListener('webglcontextlost', this.onContextLost);
     this.renderer.domElement.removeEventListener('webglcontextrestored', this.onContextRestored);

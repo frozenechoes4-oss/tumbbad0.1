@@ -4,12 +4,17 @@ import {
   canUnlockExit,
   CAVERN_PILLARS,
   computeDepthFactor,
+  computeHorrorTension,
+  detectAutoInputMode,
   evaluateMonsterState,
   formatRunTime,
   getFloorHeight,
   isPlayerCaptured,
+  MONSTER_SPEEDS,
+  PLAYER_SPEEDS,
   REQUIRED_COINS,
   resolveWorldConstraints,
+  shouldTriggerAmbushJumpscare,
 } from './rules';
 
 test('getFloorHeight handles courtyard, staircase slope, and deep cavern floor', () => {
@@ -57,7 +62,7 @@ test('resolveWorldConstraints keeps player inside cavern perimeter and outside p
   assert.ok(Math.abs(dist - (pillar.r + 0.55)) < 0.001);
 });
 
-test('evaluateMonsterState switches to CHASE on sprint or lantern exposure, and DECOY overrides', () => {
+test('evaluateMonsterState switches to CHASE on sprint, proximity, or lantern exposure, and DECOY overrides', () => {
   // Sprinting near monster triggers chase immediately
   const sprintChase = evaluateMonsterState({
     prevState: 'PATROL',
@@ -73,12 +78,47 @@ test('evaluateMonsterState switches to CHASE on sprint or lantern exposure, and 
   });
   assert.equal(sprintChase.nextState, 'CHASE');
   assert.equal(sprintChase.triggeredChase, true);
-  assert.equal(sprintChase.alertTimer, 6.5);
+  assert.equal(sprintChase.alertTimer, 7.5);
 
-  // Shining lantern continuously builds exposure > 1.15 -> CHASE
+  // Walking upright right beside Hastar triggers proximity detection; crouching stays silent
+  const closeStand = evaluateMonsterState({
+    prevState: 'PATROL',
+    prevLightExposure: 0,
+    prevAlertTimer: 0,
+    dt: 0.016,
+    playerInCavern: true,
+    distToPlayerXZ: 4.5,
+    distToPlayer3D: 4.5,
+    lookDot: 0,
+    isSprinting: false,
+    isCrouching: false,
+    isMoving: true,
+    hasActiveDecoy: false,
+  });
+  assert.equal(closeStand.nextState, 'CHASE');
+  assert.equal(closeStand.proximityDetected, true);
+
+  const closeCrouch = evaluateMonsterState({
+    prevState: 'PATROL',
+    prevLightExposure: 0,
+    prevAlertTimer: 0,
+    dt: 0.016,
+    playerInCavern: true,
+    distToPlayerXZ: 4.5,
+    distToPlayer3D: 4.5,
+    lookDot: 0,
+    isSprinting: false,
+    isCrouching: true,
+    isMoving: true,
+    hasActiveDecoy: false,
+  });
+  assert.equal(closeCrouch.nextState, 'PATROL');
+  assert.equal(closeCrouch.proximityDetected, false);
+
+  // Shining lantern continuously builds exposure > 1.05 -> CHASE
   const lightChase = evaluateMonsterState({
     prevState: 'PATROL',
-    prevLightExposure: 1.1,
+    prevLightExposure: 1.0,
     prevAlertTimer: 0,
     dt: 0.1,
     playerInCavern: true,
@@ -106,6 +146,92 @@ test('evaluateMonsterState switches to CHASE on sprint or lantern exposure, and 
   });
   assert.equal(decoyOverride.nextState, 'DECOY');
   assert.equal(decoyOverride.lightExposure, 0);
+});
+
+test('monster speed is faster than before and chase exceeds player sprint', () => {
+  assert.ok(MONSTER_SPEEDS.PATROL > 4.5);
+  assert.ok(MONSTER_SPEEDS.CHASE > PLAYER_SPEEDS.SPRINT);
+  assert.ok(MONSTER_SPEEDS.DECOY > MONSTER_SPEEDS.CHASE);
+});
+
+test('auto input detection switches between desktop PC and mobile touch devices', () => {
+  assert.equal(
+    detectAutoInputMode({
+      hasCoarsePointer: false,
+      maxTouchPoints: 0,
+      viewportWidth: 1440,
+      recentTouch: false,
+    }),
+    'desktop'
+  );
+  // Touch-screen PC laptop stays desktop until touched
+  assert.equal(
+    detectAutoInputMode({
+      hasCoarsePointer: false,
+      maxTouchPoints: 10,
+      viewportWidth: 1440,
+      recentTouch: false,
+    }),
+    'desktop'
+  );
+  // Mobile phone or active touch switches to mobile
+  assert.equal(
+    detectAutoInputMode({
+      hasCoarsePointer: true,
+      maxTouchPoints: 5,
+      viewportWidth: 390,
+      recentTouch: false,
+    }),
+    'mobile'
+  );
+  assert.equal(
+    detectAutoInputMode({
+      hasCoarsePointer: false,
+      maxTouchPoints: 0,
+      viewportWidth: 1280,
+      recentTouch: true,
+    }),
+    'mobile'
+  );
+});
+
+test('jumpscare trigger and horror tension helpers behave predictably', () => {
+  assert.equal(
+    shouldTriggerAmbushJumpscare({
+      triggeredChase: true,
+      monsterState: 'CHASE',
+      distToPlayerXZ: 14,
+      cooldownRemaining: 0,
+      playerInCavern: true,
+    }),
+    true
+  );
+  assert.equal(
+    shouldTriggerAmbushJumpscare({
+      triggeredChase: true,
+      monsterState: 'CHASE',
+      distToPlayerXZ: 14,
+      cooldownRemaining: 5,
+      playerInCavern: true,
+    }),
+    false
+  );
+  assert.ok(
+    computeHorrorTension({
+      monsterState: 'CHASE',
+      distToPlayerXZ: 4,
+      playerInCavern: true,
+      lightExposureRatio: 0.8,
+    }) >= 0.9
+  );
+  assert.ok(
+    computeHorrorTension({
+      monsterState: 'PATROL',
+      distToPlayerXZ: 25,
+      playerInCavern: false,
+      lightExposureRatio: 0,
+    }) < 0.1
+  );
 });
 
 test('capture, exit unlock, depth factor, and run timer helpers work accurately', () => {
